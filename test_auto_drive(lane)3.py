@@ -32,19 +32,20 @@ from PIL import Image
 from ultralytics import YOLO
 
 # ── 설정 ──────────────────────────────────────────────────────────
-IMITATION_MODEL = "C:/PROJECT7/drive_best2.pth"                    #자율 주행하는 모델 
+IMITATION_MODEL = "C:/PROJECT7/drive_best.pth"                    #자율 주행하는 모델 
 LANE_MODEL      = "C:/PROJECT7/runs/lane_seg_v3/weights/best.pt"   #레인 detect 모델
 OBJECT_MODEL    = "C:/PROJECT7/runs/object_det_v1\weights/best.pt" # 물체 detect 모델
 LISTEN_PORT     = 5002
 MIRROR_LR       = True
-SPEED_SCALE     = 0.8
+SPEED_SCALE     = 0.7
+DISPLAY_FPS     = 30   # 화면 업데이트 주기 (낮출수록 루프가 빨라짐, 모터 제어는 영향 없음)
 
 # 차선 안전장치
 LANE_THRESHOLD      = 130
 MIN_MASK_PIX        = 300
 INLINE_CLASS        = 0
 DEVIATION_COUNT     = 3
-CORRECTION_COOLDOWN = 0.5
+CORRECTION_COOLDOWN = 1.0
 
 # 횡단보도
 CROSSWALK_CLASS          = 2
@@ -54,24 +55,29 @@ CROSSWALK_CONF_THR       = 0.45
 
 # 장애물 회피
 OBJECT_CLASS         = 0       # object.pt 의 장애물 클래스 인덱스
-OBJECT_CONF_THR      = 0.50    # 감지 최소 confidence
-OBJECT_MIN_BOX_AREA  = 2000    # 최소 bbox 면적(px²) - 너무 먼 물체 무시
-OBJECT_STEER_SEC     = 1.0     # 회피 조향 유지 시간 (초)
-OBJECT_COOLDOWN_SEC  = 4.0     # 회피 완료 후 쿨다운 (초) - 재감지 방지
-OBJECT_AVOID_SCALE   = 0.55    # 회피 조향 강도 (약하게 → 차선 유지)
-OBJECT_CONFIRM_WINDOW = 5      # 판단 기준 프레임 수 (최근 N프레임)
-OBJECT_CONFIRM_RATIO  = 0.6    # N프레임 중 이 비율 이상 감지돼야 회피 시작 (예: 0.6 → 5프레임 중 3번)
+OBJECT_CONF_THR      = 0.6   # 감지 최소 confidence
+OBJECT_MIN_BOX_AREA  = 2000  # bbox 최소 면적(px²) - 이것보다 작으면 무시 (멀리 있는 물체, 노이즈 제거)
+OBJECT_CONFIRM_FRAMES = 1    # 연속 N프레임 감지되어야 트리거 (오감지 방지, 높이면 느리게 반응)
+OBJECT_STOP_SEC      = 0.0     # 감지 직후 브레이킹 시간 (0=즉시 조향, 속도 있는 채로 꺾는게 더 효과적)
+OBJECT_STEER_SEC     = 1.3     # 회피 조향 유지 시간 (초) ← 브레이킹 없으니 약간 늘림
+OBJECT_FORWARD_SEC   = 1.0     # 회피 후 직진 시간 (초)
+OBJECT_RETURN_SEC_A  = 1.3     # 'a'(좌복귀) 조향 시간 (초)
+OBJECT_RETURN_SEC_D  = 1.8     # 'd'(우복귀) 조향 시간 (초)
+OBJECT_POST_FWD_SEC  = 0.8     # 복귀 조향 후 직진 시간 (초)
+OBJECT_COOLDOWN_SEC  = 4.0     # 복귀 완료 후 쿨다운 (초) - 재감지 방지
+OBJECT_AVOID_SCALE_D = 0.6   # 'd'(우회피/우복귀) 조향 강도 ← 속도 있는 채로 꺾으니 강도 올림
+OBJECT_AVOID_SCALE_A = 0.6   # 'a'(좌회피/좌복귀) 조향 강도
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # ─────────────────────────────────────────────────────────────────
 
 COMBO_MOTOR = {
-    'w' : (-80,  -80),
-    's' : ( 80,   80),
-    'a' : ( 20, -100),
-    'd' : (-100,  20),
-    'wa': (-80,  -20),
-    'wd': (-20,  -80),
+    'w' : (-90,  -90),
+    's' : ( 90,   90),
+    'a' : ( 30, -120),
+    'd' : (-120,  30),
+    'wa': (-100,  -30),
+    'wd': (-30,  -100),
     'sa': ( 80,   20),
     'sd': ( 20,   80),
 }
@@ -127,17 +133,19 @@ _lane_input          = None
 _lane_error          = None
 _lane_raw_error      = None
 _lane_status         = "대기 중"
+_obj_confirm_count   = 0     # 스레드 내부: 연속 감지 프레임 카운터
+_obj_confirm_side    = None  # 스레드 내부: 카운터 누적 중인 방향
 _lane_lock           = threading.Lock()
 _dev_count           = 0
 _crosswalk_detected  = False
-_object_detected     = False   # 장애물 감지 플래그 (비율 조건 충족 시 True)
+_object_detected     = False   # 장애물 감지 플래그
 _object_side         = None    # 'left' or 'right'
-_object_history      = []      # 최근 N프레임 감지 이력: (detected: bool, side: str|None)
 
 # ── 차선 + 장애물 감지 스레드 ─────────────────────────────────────
 def lane_thread_func():
     global _lane_input, _lane_error, _lane_raw_error, _lane_status
     global _dev_count, _crosswalk_detected, _object_detected, _object_side
+    global _obj_confirm_count, _obj_confirm_side
 
     while True:
         with _lane_lock:
@@ -150,42 +158,41 @@ def lane_thread_func():
 
         h, w = frame.shape[:2]
 
-        # ── 장애물 감지 (object.pt) ────────────────────────────────
-        obj_results = object_model(frame, verbose=False)[0]
-        frame_detected = False
-        frame_side     = None
+        # ── 장애물 감지 (object.pt) - imgsz=320으로 빠른 추론 ─────
+        obj_results  = object_model(frame, verbose=False, imgsz=320)[0]
+        found_this_frame = False   # 이번 프레임에서 유효한 감지가 있었는지
+
         for i, cls in enumerate(obj_results.boxes.cls):
             if int(cls) == OBJECT_CLASS:
                 conf = float(obj_results.boxes.conf[i])
                 if conf >= OBJECT_CONF_THR:
-                    box  = obj_results.boxes.xyxy[i].cpu().numpy()
-                    area = (box[2] - box[0]) * (box[3] - box[1])
-                    if area >= OBJECT_MIN_BOX_AREA:
-                        cx_box         = (box[0] + box[2]) / 2
-                        frame_detected = True
-                        frame_side     = 'left' if cx_box < w / 2 else 'right'
-                        break
+                    box      = obj_results.boxes.xyxy[i].cpu().numpy()
+                    box_w    = box[2] - box[0]
+                    box_h    = box[3] - box[1]
+                    box_area = box_w * box_h
+                    if box_area < OBJECT_MIN_BOX_AREA:
+                        continue
+                    # 이번 프레임에서 조건을 만족하는 감지 발견
+                    found_this_frame = True
+                    _obj_confirm_side = 'left' if (box[0] + box[2]) / 2 < w / 2 else 'right'
+                    break
 
-        # 이력 버퍼 갱신 (최근 OBJECT_CONFIRM_WINDOW 프레임만 유지)
-        with _lane_lock:
-            _object_history.append((frame_detected, frame_side))
-            if len(_object_history) > OBJECT_CONFIRM_WINDOW:
-                _object_history.pop(0)
-
-            # 버퍼가 충분히 쌓였을 때만 비율 판단
-            if len(_object_history) == OBJECT_CONFIRM_WINDOW:
-                det_frames = [e for e in _object_history if e[0]]
-                ratio = len(det_frames) / OBJECT_CONFIRM_WINDOW
-                if ratio >= OBJECT_CONFIRM_RATIO:
-                    # 감지된 프레임들 중 다수결로 방향 결정
-                    sides = [e[1] for e in det_frames]
-                    dominant_side = 'left' if sides.count('left') >= sides.count('right') else 'right'
+        if found_this_frame:
+            # 연속 감지 카운터 증가
+            _obj_confirm_count += 1
+            if _obj_confirm_count >= OBJECT_CONFIRM_FRAMES:
+                # N프레임 연속 감지 → 진짜 장애물로 판단, 트리거
+                with _lane_lock:
                     _object_detected = True
-                    _object_side     = dominant_side
-                    _object_history.clear()   # 트리거 후 버퍼 초기화 (중복 트리거 방지)
+                    _object_side     = _obj_confirm_side
+                _obj_confirm_count = 0   # 트리거 후 카운터 리셋
+        else:
+            # 이번 프레임에서 감지 안 됨 → 카운터 리셋 (연속이 끊김)
+            _obj_confirm_count = 0
+            _obj_confirm_side  = None
 
-        # ── 차선 감지 (lane model) ─────────────────────────────────
-        lane_results = lane_model(frame, verbose=False)[0]
+        # ── 차선 감지 (lane model) - imgsz=320으로 빠른 추론 ──────
+        lane_results = lane_model(frame, verbose=False, imgsz=320)[0]
 
         # 횡단보도 감지
         for i, cls in enumerate(lane_results.boxes.cls):
@@ -206,8 +213,7 @@ def lane_thread_func():
         combined = np.zeros((h, w), dtype=np.float32)
         for i, cls in enumerate(lane_results.boxes.cls):
             if int(cls) == INLINE_CLASS:
-                mask     = lane_results.masks.data[i].cpu().numpy()
-                combined = np.maximum(combined, cv2.resize(mask, (w, h)))
+                combined = np.maximum(combined, cv2.resize(lane_results.masks.data[i].cpu().numpy(), (w, h)))
 
         bottom = combined[h // 2:, :]
         if bottom.sum() < MIN_MASK_PIX:
@@ -281,13 +287,19 @@ last_key             = 'stop'
 last_conf            = 0.0
 lane_status          = "대기 중"
 last_correction_t    = 0.0
+last_display_t       = 0.0   # 마지막 화면 업데이트 시각 (display throttle용)
 disp_raw_error       = None
 crosswalk_stop_until     = 0.0
 crosswalk_cooldown_until = 0.0
 
 # 장애물 회피 상태
+avoid_stop_until      = 0.0    # 이 시각까지 감지 직후 정지 (브레이킹)
 avoid_end_t           = 0.0    # 이 시각까지 회피 조향 유지
+avoid_fwd_end_t       = 0.0    # 이 시각까지 직진 (회피 후 전진)
+avoid_ret_end_t       = 0.0    # 이 시각까지 복귀 조향 (반대 방향)
+avoid_post_fwd_end_t  = 0.0    # 이 시각까지 복귀 후 직진
 avoid_dir             = None   # 'a' or 'd'
+avoid_ret_dir         = None   # 복귀 방향 ('a'→'d', 'd'→'a')
 object_cooldown_until = 0.0    # 이 시각까지 재감지 무시
 
 print("자율주행 시작 | SPACE=일시정지 | L=차선안전장치토글 | ESC=종료\n")
@@ -296,20 +308,37 @@ while True:
     got_frame = False
     frame     = None
 
-    try:
-        data, addr = sock.recvfrom(1_000_000)
-        if len(data) >= 4:
-            size     = int.from_bytes(data[:4], 'little')
-            img_data = data[4:4 + size]
-            if len(img_data) == size:
-                arr   = np.frombuffer(img_data, dtype=np.uint8)
-                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if frame is not None:
-                    if MIRROR_LR:
-                        frame = cv2.flip(frame, 1)
-                    got_frame = True
-    except socket.timeout:
-        pass
+    # 쌓인 UDP 패킷을 모두 드레인 → 가장 최신 프레임만 사용
+    latest_data = None
+    latest_addr = None
+    sock.settimeout(0)          # 논블로킹으로 전환
+    while True:
+        try:
+            d, a = sock.recvfrom(1_000_000)
+            latest_data = d
+            latest_addr = a
+        except (socket.timeout, BlockingIOError):
+            break
+    sock.settimeout(0.02)       # 다시 원래 타임아웃으로
+
+    if latest_data is None:
+        # 버퍼가 비어있으면 최대 20ms 대기
+        try:
+            latest_data, latest_addr = sock.recvfrom(1_000_000)
+        except socket.timeout:
+            pass
+
+    if latest_data is not None and len(latest_data) >= 4:
+        addr     = latest_addr
+        size     = int.from_bytes(latest_data[:4], 'little')
+        img_data = latest_data[4:4 + size]
+        if len(img_data) == size:
+            arr   = np.frombuffer(img_data, dtype=np.uint8)
+            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if frame is not None:
+                if MIRROR_LR:
+                    frame = cv2.flip(frame, 1)
+                got_frame = True
 
     key = cv2.waitKey(1) & 0xFF
     if key == 27:
@@ -353,21 +382,43 @@ while True:
                 crosswalk_cooldown_until = now + CROSSWALK_STOP_SEC + CROSSWALK_COOLDOWN_SEC
                 print(f"[횡단보도] 감지! {CROSSWALK_STOP_SEC:.0f}초 정지 → 이후 {CROSSWALK_COOLDOWN_SEC:.0f}초 쿨다운")
 
-            # ── 장애물 감지 → 회피 시작 ────────────────────────────
-            if obj_det and now > object_cooldown_until and now > avoid_end_t:
-                # 장애물이 왼쪽 → 오른쪽 회피 ('d'), 오른쪽 → 왼쪽 회피 ('a')
-                avoid_dir             = 'd' if obj_side == 'left' else 'a'
-                avoid_end_t           = now + OBJECT_STEER_SEC
-                object_cooldown_until = now + OBJECT_STEER_SEC + OBJECT_COOLDOWN_SEC
-                print(f"[장애물] {obj_side}쪽 감지 → '{avoid_dir}' 방향 회피 ({OBJECT_STEER_SEC}초)")
+            # ── 장애물 감지 → 정지 후 회피 시작 ──────────────────────
+            if obj_det and now > object_cooldown_until and now > avoid_ret_end_t:
+                avoid_dir     = 'd' if obj_side == 'left' else 'a'
+                avoid_ret_dir = 'a' if avoid_dir == 'd' else 'd'
+
+                # 복귀 방향에 따라 복귀 조향 시간 선택
+                ret_sec = OBJECT_RETURN_SEC_D if avoid_ret_dir == 'd' else OBJECT_RETURN_SEC_A
+
+                avoid_stop_until      = now + OBJECT_STOP_SEC
+                avoid_end_t           = now + OBJECT_STOP_SEC + OBJECT_STEER_SEC
+                avoid_fwd_end_t       = now + OBJECT_STOP_SEC + OBJECT_STEER_SEC + OBJECT_FORWARD_SEC
+                avoid_ret_end_t       = now + OBJECT_STOP_SEC + OBJECT_STEER_SEC + OBJECT_FORWARD_SEC + ret_sec
+                avoid_post_fwd_end_t  = now + OBJECT_STOP_SEC + OBJECT_STEER_SEC + OBJECT_FORWARD_SEC + ret_sec + OBJECT_POST_FWD_SEC
+                object_cooldown_until = now + OBJECT_STOP_SEC + OBJECT_STEER_SEC + OBJECT_FORWARD_SEC + ret_sec + OBJECT_POST_FWD_SEC + OBJECT_COOLDOWN_SEC
+                print(f"[장애물] {obj_side}쪽 → 정지 → '{avoid_dir}' → 직진 → '{avoid_ret_dir}'(복귀)")
 
             # ── 우선순위에 따른 모터 명령 결정 ────────────────────
             if now < crosswalk_stop_until:
                 # 최우선: 횡단보도 정지
                 motor = '0,0'
+            elif now < avoid_stop_until:
+                # 2순위-a: 장애물 감지 직후 브레이킹 정지
+                motor = '0,0'
             elif now < avoid_end_t:
-                # 2순위: 장애물 회피 (약한 강도)
-                motor = to_motor_str(avoid_dir, OBJECT_AVOID_SCALE)
+                # 2순위-b: 장애물 회피 조향
+                avoid_scale = OBJECT_AVOID_SCALE_D if avoid_dir == 'd' else OBJECT_AVOID_SCALE_A
+                motor = to_motor_str(avoid_dir, avoid_scale)
+            elif now < avoid_fwd_end_t:
+                # 2순위-c: 회피 후 직진
+                motor = to_motor_str('w', SPEED_SCALE)
+            elif now < avoid_ret_end_t:
+                # 2순위-d: 직진 후 복귀 조향 (반대 방향)
+                ret_scale = OBJECT_AVOID_SCALE_D if avoid_ret_dir == 'd' else OBJECT_AVOID_SCALE_A
+                motor = to_motor_str(avoid_ret_dir, ret_scale)
+            elif now < avoid_post_fwd_end_t:
+                # 2순위-e: 복귀 조향 후 직진
+                motor = to_motor_str('w', SPEED_SCALE)
             elif error is not None and (now - last_correction_t) > CORRECTION_COOLDOWN:
                 # 3순위: 차선 이탈 보정
                 if error > 0:
@@ -387,9 +438,13 @@ while True:
     if got_frame and frame is not None:
         disp = frame.copy()
 
-    if disp is not None:
-        h_img, w_img = disp.shape[:2]
-        now_d        = time.time()
+    # 화면 업데이트는 DISPLAY_FPS 주기로만 실행 (모터 전송과 무관)
+    now_d = time.time()
+    do_display = (now_d - last_display_t) >= (1.0 / DISPLAY_FPS)
+
+    if do_display and disp is not None:
+        last_display_t = now_d
+        h_img, w_img   = disp.shape[:2]
 
         status     = "[PAUSE]" if paused else "[AUTO]"
         status_col = (0, 165, 255) if paused else (0, 255, 0)
@@ -446,7 +501,15 @@ while True:
                         (10, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (90, 170, 255), 1)
 
         # ── 장애물 회피 오버레이 ──────────────────────────────────
-        if now_d < avoid_end_t:
+        if now_d < avoid_stop_until:
+            remain_st = avoid_stop_until - now_d
+            ov_y1, ov_y2 = h_img // 2 - 45, h_img // 2 + 45
+            cv2.rectangle(disp, (0, ov_y1), (w_img, ov_y2), (0, 0, 140), -1)
+            cv2.rectangle(disp, (0, ov_y1), (w_img, ov_y2), (0, 100, 255), 3)
+            cv2.putText(disp, f"OBJECT  BRAKING  {remain_st:.1f}s",
+                        (w_img // 2 - 185, h_img // 2 + 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.90, (255, 255, 255), 2)
+        elif now_d < avoid_end_t:
             remain_av = avoid_end_t - now_d
             ov_y1, ov_y2 = h_img // 2 - 45, h_img // 2 + 45
             cv2.rectangle(disp, (0, ov_y1), (w_img, ov_y2), (0, 100, 0), -1)
@@ -454,6 +517,31 @@ while True:
             dir_label = "RIGHT" if avoid_dir == 'd' else "LEFT"
             cv2.putText(disp, f"OBJECT  AVOID {dir_label}  {remain_av:.1f}s",
                         (w_img // 2 - 200, h_img // 2 + 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.90, (255, 255, 255), 2)
+        elif now_d < avoid_fwd_end_t:
+            remain_fwd = avoid_fwd_end_t - now_d
+            ov_y1, ov_y2 = h_img // 2 - 45, h_img // 2 + 45
+            cv2.rectangle(disp, (0, ov_y1), (w_img, ov_y2), (100, 60, 0), -1)
+            cv2.rectangle(disp, (0, ov_y1), (w_img, ov_y2), (0, 180, 255), 3)
+            cv2.putText(disp, f"OBJECT  FORWARD  {remain_fwd:.1f}s",
+                        (w_img // 2 - 185, h_img // 2 + 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.90, (255, 255, 255), 2)
+        elif now_d < avoid_ret_end_t:
+            remain_ret = avoid_ret_end_t - now_d
+            ov_y1, ov_y2 = h_img // 2 - 45, h_img // 2 + 45
+            cv2.rectangle(disp, (0, ov_y1), (w_img, ov_y2), (80, 0, 80), -1)
+            cv2.rectangle(disp, (0, ov_y1), (w_img, ov_y2), (255, 100, 255), 3)
+            ret_label = "RIGHT" if avoid_ret_dir == 'd' else "LEFT"
+            cv2.putText(disp, f"OBJECT  RETURN {ret_label}  {remain_ret:.1f}s",
+                        (w_img // 2 - 205, h_img // 2 + 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.90, (255, 255, 255), 2)
+        elif now_d < avoid_post_fwd_end_t:
+            remain_pfwd = avoid_post_fwd_end_t - now_d
+            ov_y1, ov_y2 = h_img // 2 - 45, h_img // 2 + 45
+            cv2.rectangle(disp, (0, ov_y1), (w_img, ov_y2), (100, 60, 0), -1)
+            cv2.rectangle(disp, (0, ov_y1), (w_img, ov_y2), (0, 180, 255), 3)
+            cv2.putText(disp, f"OBJECT  POST-FWD  {remain_pfwd:.1f}s",
+                        (w_img // 2 - 185, h_img // 2 + 12),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.90, (255, 255, 255), 2)
         elif object_cooldown_until > now_d:
             remain_oc = int(object_cooldown_until - now_d)
