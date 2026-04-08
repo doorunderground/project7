@@ -1,4 +1,7 @@
-# 라인 따라서 
+# 라인 따라서 데이터셋 모은거, 
+# 앞에 물체 있을 때 회피 기능 넣은거 
+# -> drive_object.pth
+
 
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -29,16 +32,12 @@ from PIL import Image
 import numpy as np
 
 # ── 설정 ──────────────────────────────────────────────────────────
-DATA_ROOTS = [
-    "C:/PROJECT7/drive_dataset",    # 기존 차선 주행 데이터
-    "C:/PROJECT7/oject_dataset",    # 추가 회피 주행 데이터
-]
-FINETUNE_FROM = "C:/PROJECT7/drive.pth"   # 기존 모델에서 fine-tuning
-SAVE_PATH  = "C:/PROJECT7/object.pth"
+DATA_ROOT  = "C:/PROJECT7/drive_dataset"
+SAVE_PATH  = "C:/PROJECT7/drive_best2.pth"
 IMG_SIZE   = 224
 BATCH      = 32
-EPOCHS     = 20
-LR         = 1e-5
+EPOCHS     = 30
+LR         = 1e-4
 VAL_RATIO  = 0.15      # 전체 데이터의 15%를 validation으로 사용
 DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -85,14 +84,11 @@ def load_samples(data_root: str):
 
 # ── 메인 ─────────────────────────────────────────────────────────
 print(f"디바이스: {DEVICE}")
+print(f"데이터 로드 중: {DATA_ROOT}")
 
-samples = []
-for root in DATA_ROOTS:
-    s = load_samples(root)
-    print(f"데이터 로드 중: {root}  ({len(s)}장)")
-    samples += s
+samples = load_samples(DATA_ROOT)
 if not samples:
-    print("데이터 없음. DATA_ROOTS 폴더 확인하세요.")
+    print("데이터 없음. collected_data/ 폴더 확인하세요.")
     exit(1)
 
 # 실제 데이터에 존재하는 클래스만 사용
@@ -145,11 +141,8 @@ train_loader = DataLoader(train_ds, batch_size=BATCH, shuffle=True,  num_workers
 val_loader   = DataLoader(val_ds,   batch_size=BATCH, shuffle=False, num_workers=0)
 
 # ── 모델 ─────────────────────────────────────────────────────────
-model = models.mobilenet_v3_small(weights=None)
+model = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.DEFAULT)
 model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, NUM_CLASSES)
-ckpt = torch.load(FINETUNE_FROM, map_location=DEVICE)
-model.load_state_dict(ckpt['model_state'])
-print(f"기존 모델 로드 완료: {FINETUNE_FROM}")
 model = model.to(DEVICE)
 
 criterion = nn.CrossEntropyLoss(weight=class_weights)

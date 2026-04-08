@@ -5,7 +5,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 장애물 감지 모델 학습 (YOLOv8n Detection)
 
 ── 데이터 구조 ───────────────────────────────────────────────────────────────
-  C:/PROJECT7/object/
+  C:/PROJECT7/object_dataset/
   └── 20260406_181559/
       ├── frame_000002.jpg
       ├── frame_000002.json   ← LabelMe rectangle 라벨
@@ -40,10 +40,10 @@ ROOT_DIR = Path(__file__).resolve().parent
 
 # 라벨링된 데이터 폴더 목록 (여러 개 추가 가능)
 DATA_DIRS = [
-    ROOT_DIR / "object" / "20260406_181559",
+    ROOT_DIR / "object_dataset" / "20260406_181559",
 ]
 
-DATASET_DIR  = ROOT_DIR / "object_dataset"   # 변환 후 저장 위치 (자동 생성)
+DATASET_DIR  = ROOT_DIR / "object_train_dataset"   # 변환 후 저장 위치 (자동 생성)
 RUN_NAME     = "object_det_v1"
 BASE_MODEL   = "yolov8n.pt"                  # 자동 다운로드
 OUTPUT_MODEL = ROOT_DIR / "abcde.pt"         # 자율주행 코드가 읽는 경로
