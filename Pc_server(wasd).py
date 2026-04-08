@@ -35,7 +35,7 @@ import numpy as np
 LISTEN_PORT  = 5002
 KEY_HOLD_SEC = 0.15          # 키 홀드 시간 (동시 입력 인식 여유 포함)
 MIRROR_LR    = True
-SAVE_ROOT    = "C:/PROJECT7/drive_dataset"
+SAVE_ROOT    = "C:/PROJECT7/drive_dataset3"
 # ─────────────────────────────────────────────────────────────
 
 # 키 코드

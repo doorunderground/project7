@@ -22,7 +22,7 @@ VALID_LBL_DIR = DATASET_DIR / "valid" / "labels"
 DATA_YAML = DATASET_DIR / "data.yaml"
 
 PROJECT_DIR = ROOT_DIR / "runs"
-RUN_NAME = "lane_seg_v3"
+RUN_NAME = "lane_seg_v5"
 
 PRETRAINED_MODEL = ROOT_DIR / "best.pt"
 FALLBACK_MODEL = "yolov8n-seg.pt"

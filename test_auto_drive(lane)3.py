@@ -37,7 +37,7 @@ LANE_MODEL      = "C:/PROJECT7/runs/lane_seg_v3/weights/best.pt"   #레인 detec
 OBJECT_MODEL    = "C:/PROJECT7/runs/object_det_v1\weights/best.pt" # 물체 detect 모델
 LISTEN_PORT     = 5002
 MIRROR_LR       = True
-SPEED_SCALE     = 0.7
+SPEED_SCALE     = 0.70
 DISPLAY_FPS     = 30   # 화면 업데이트 주기 (낮출수록 루프가 빨라짐, 모터 제어는 영향 없음)
 
 # 차선 안전장치
@@ -50,7 +50,7 @@ CORRECTION_COOLDOWN = 1.0
 # 횡단보도
 CROSSWALK_CLASS          = 2
 CROSSWALK_STOP_SEC       = 3.0
-CROSSWALK_COOLDOWN_SEC   = 30.0
+CROSSWALK_COOLDOWN_SEC   = 8.0
 CROSSWALK_CONF_THR       = 0.45
 
 # 장애물 회피
@@ -59,14 +59,14 @@ OBJECT_CONF_THR      = 0.6   # 감지 최소 confidence
 OBJECT_MIN_BOX_AREA  = 2000  # bbox 최소 면적(px²) - 이것보다 작으면 무시 (멀리 있는 물체, 노이즈 제거)
 OBJECT_CONFIRM_FRAMES = 1    # 연속 N프레임 감지되어야 트리거 (오감지 방지, 높이면 느리게 반응)
 OBJECT_STOP_SEC      = 0.0     # 감지 직후 브레이킹 시간 (0=즉시 조향, 속도 있는 채로 꺾는게 더 효과적)
-OBJECT_STEER_SEC     = 1.3     # 회피 조향 유지 시간 (초) ← 브레이킹 없으니 약간 늘림
-OBJECT_FORWARD_SEC   = 1.0     # 회피 후 직진 시간 (초)
-OBJECT_RETURN_SEC_A  = 1.3     # 'a'(좌복귀) 조향 시간 (초)
-OBJECT_RETURN_SEC_D  = 1.8     # 'd'(우복귀) 조향 시간 (초)
-OBJECT_POST_FWD_SEC  = 0.8     # 복귀 조향 후 직진 시간 (초)
+OBJECT_STEER_SEC     = 0.9     # 회피 조향 유지 시간 (초)
+OBJECT_FORWARD_SEC   = 0.9     # 회피 후 직진 시간 (초)
+OBJECT_RETURN_SEC_A  = 1.2     # 'a'(좌복귀) 조향 시간 (초)
+OBJECT_RETURN_SEC_D  = 1.2     # 'd'(우복귀) 조향 시간 (초)
+OBJECT_POST_FWD_SEC  = 0.7     # 복귀 조향 후 직진 시간 (초)
 OBJECT_COOLDOWN_SEC  = 4.0     # 복귀 완료 후 쿨다운 (초) - 재감지 방지
-OBJECT_AVOID_SCALE_D = 0.6   # 'd'(우회피/우복귀) 조향 강도 ← 속도 있는 채로 꺾으니 강도 올림
-OBJECT_AVOID_SCALE_A = 0.6   # 'a'(좌회피/좌복귀) 조향 강도
+OBJECT_AVOID_SCALE_D = 0.6   # 'd'(우회피/우복귀) 조향 강도
+OBJECT_AVOID_SCALE_A = 0.5   # 'a'(좌회피/좌복귀) 조향 강도
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # ─────────────────────────────────────────────────────────────────
